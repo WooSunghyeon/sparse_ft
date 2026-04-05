@@ -185,15 +185,10 @@ def train_smt(
     last_checkpoint = get_last_checkpoint(output_dir)
     trainer.train(resume_from_checkpoint=last_checkpoint)
 
-    # Merge deltas
-    with torch.no_grad():
-        for module in model.modules():
-            if isinstance(module, BlockSparseLinear):
-                delta_flat = torch.zeros(module.weight.numel(), dtype=module.weight.dtype, device=module.weight.device)
-                delta_flat.scatter_(0, module.flat_idx, module.sparse_delta.data.to(module.weight.dtype))
-                module.weight.data += delta_flat.view(module.weight.shape)
-
-    trainer.save_model(output_dir)
+    # Restore to clean nn.Linear for vLLM/HF loading
+    from lmflow.pipeline.rapa.sift_tuner import restore_linear_modules
+    model = restore_linear_modules(model)
+    model.save_pretrained(output_dir)
     tokenizer.save_pretrained(output_dir)
     logger.info(f"[SMT] Model saved to {output_dir}")
     return output_dir

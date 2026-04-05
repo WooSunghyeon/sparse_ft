@@ -29,6 +29,47 @@ if SIFT_PATH not in sys.path:
 from sift import SIFT  # noqa: E402
 
 
+def restore_linear_modules(model):
+    """Replace all SparseLinear/BlockSparseLinear/RowSparseLinear back to nn.Linear for clean saving."""
+    sparse_types = (SparseLinear,)
+    # Import other sparse types if available
+    try:
+        from lmflow.pipeline.rapa.smt_tuner import BlockSparseLinear
+        sparse_types = sparse_types + (BlockSparseLinear,)
+    except ImportError:
+        pass
+    try:
+        from lmflow.pipeline.rapa.s2ft_tuner import RowSparseLinear
+        sparse_types = sparse_types + (RowSparseLinear,)
+    except ImportError:
+        pass
+
+    for name, module in list(model.named_modules()):
+        if isinstance(module, sparse_types):
+            # Merge delta into weight
+            with torch.no_grad():
+                delta_flat = torch.zeros(module.weight.numel(), dtype=module.weight.dtype, device=module.weight.device)
+                delta_flat.scatter_(0, module.flat_idx, module.sparse_delta.data.to(module.weight.dtype))
+                merged_weight = module.weight.data + delta_flat.view(module.weight.shape)
+
+            # Create clean nn.Linear
+            new_linear = nn.Linear(module.in_features, module.out_features,
+                                   bias=module.bias is not None,
+                                   device=merged_weight.device, dtype=merged_weight.dtype)
+            new_linear.weight.data.copy_(merged_weight)
+            if module.bias is not None:
+                new_linear.bias.data.copy_(module.bias.data)
+
+            # Replace in model
+            parts = name.split(".")
+            parent = model
+            for p in parts[:-1]:
+                parent = getattr(parent, p)
+            setattr(parent, parts[-1], new_linear)
+
+    return model
+
+
 def compute_sparse_rate(model, target_params=170_000_000, sparse_modules=None):
     if sparse_modules is None:
         sparse_modules = ["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"]
@@ -239,14 +280,9 @@ def train_sift(
     last_checkpoint = get_last_checkpoint(output_dir)
     trainer.train(resume_from_checkpoint=last_checkpoint)
 
-    # Merge sparse deltas back into weights and save
-    with torch.no_grad():
-        for module in model.modules():
-            if isinstance(module, SparseLinear):
-                merged = module.merge_and_get_weight()
-                module.weight.data.copy_(merged)
-
-    trainer.save_model(output_dir)
+    # Restore SparseLinear → nn.Linear (clean model for vLLM/HF loading)
+    model = restore_linear_modules(model)
+    model.save_pretrained(output_dir)
     tokenizer.save_pretrained(output_dir)
     logger.info(f"[SIFT] Model saved to {output_dir}")
     return output_dir

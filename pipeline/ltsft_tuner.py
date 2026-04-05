@@ -78,13 +78,9 @@ def train_ltsft(
     trainer = Trainer(model=model, args=training_args, train_dataset=train_dataset, tokenizer=tokenizer)
     trainer.train(resume_from_checkpoint=get_last_checkpoint(output_dir))
 
-    with torch.no_grad():
-        for m in model.modules():
-            if isinstance(m, SparseLinear):
-                df = torch.zeros(m.weight.numel(), dtype=m.weight.dtype, device=m.weight.device)
-                df.scatter_(0, m.flat_idx, m.sparse_delta.data.to(m.weight.dtype))
-                m.weight.data += df.view(m.weight.shape)
-    trainer.save_model(output_dir)
+    from lmflow.pipeline.rapa.sift_tuner import restore_linear_modules
+    model = restore_linear_modules(model)
+    model.save_pretrained(output_dir)
     tokenizer.save_pretrained(output_dir)
     logger.info(f"[LT-SFT] Model saved to {output_dir}")
     return output_dir
